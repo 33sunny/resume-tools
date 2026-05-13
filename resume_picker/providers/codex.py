@@ -203,7 +203,7 @@ class CodexProvider:
                     id=session_id,
                     title=str(title or self.fallback_title(path)),
                     cwd=meta["cwd"],
-                    provider=meta["provider"],
+                    provider=self.config.resume_command,
                     created_at=meta["created_at"],
                     updated_at=str(updated_at),
                     path=path,
