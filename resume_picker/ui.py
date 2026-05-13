@@ -75,13 +75,33 @@ class Picker:
     def message_count(self, session: Session) -> int:
         return len(self.provider.parse_dialogues(session))
 
+    def is_summary_noise(self, text: str) -> bool:
+        stripped = text.lstrip()
+        noise_prefixes = (
+            "# AGENTS.md instructions",
+            "# Configure Claude HUD",
+            "Another language model started to solve this problem",
+        )
+        return any(stripped.startswith(prefix) for prefix in noise_prefixes)
+
+    def session_message_summary(self, session: Session) -> str:
+        for dialogue in self.provider.parse_dialogues(session):
+            if dialogue.role == "user" and not self.is_summary_noise(dialogue.text):
+                return one_line(dialogue.text, 96)
+        return one_line(session.title, 96)
+
+    def session_display_title(self, session: Session) -> str:
+        summary = self.session_message_summary(session)
+        if session.renamed:
+            return one_line(f"★ {session.title} · {summary}", 140)
+        return f"  {summary}"
+
     def session_row(self, session: Session) -> str:
-        title_prefix = "★ " if session.renamed else "  "
         return "\t".join(
             [
                 session.id,
                 format_row_time(session.updated_at),
-                f"{title_prefix}{session.title}",
+                self.session_display_title(session),
                 session.cwd,
                 f"{self.message_count(session)} dialogues",
                 f"[{session.id[:8]}]",
@@ -327,7 +347,7 @@ class Picker:
         return 1
 
     def run_fzf(self, state_dir: Path, include_all: bool) -> str:
-        with_nth = "2..7" if include_all else "2,3,5,6,7"
+        with_nth = "2,3"
         command = [
             "fzf",
             "--ansi",
