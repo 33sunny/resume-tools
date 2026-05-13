@@ -143,7 +143,8 @@ class Picker:
         lines = [
             f"{WHITE}{title}{RESET}",
             f"{DIM}📁 {session.cwd}{RESET}",
-            f"{DIM}📅 {format_time(session.updated_at)}  •  {len(dialogues)} dialogues  •  {session.provider}  •  [{session.id[:8]}]{RESET}",
+            f"{DIM}📅 {format_time(session.updated_at)}  •  {len(dialogues)} dialogues  •  {session.provider}{RESET}",
+            f"{DIM}ID {session.id}{RESET}",
             "",
         ]
         if keyword:
@@ -172,6 +173,7 @@ class Picker:
         lines = [
             f"{DIM}{title}{RESET}",
             f"{DIM}📁 {session.cwd}{RESET}",
+            f"{DIM}ID {session.id}{RESET}",
             "",
             f"{BOLD}{color}{icon} {role_label} · message {target.num} of {len(dialogues)}{RESET}",
             f"{DIM}{'─' * max(1, cols - 2)}{RESET}",
