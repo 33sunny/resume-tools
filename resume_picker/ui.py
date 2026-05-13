@@ -143,8 +143,7 @@ class Picker:
         lines = [
             f"{WHITE}{title}{RESET}",
             f"{DIM}📁 {session.cwd}{RESET}",
-            f"{DIM}📅 {format_time(session.updated_at)}  •  {len(dialogues)} dialogues  •  {session.provider}{RESET}",
-            f"{DIM}ID {session.id}{RESET}",
+            f"{DIM}📅 {format_time(session.updated_at)}  •  {len(dialogues)} dialogues  •  {session.provider}  •  ID {session.id}{RESET}",
             "",
         ]
         if keyword:
