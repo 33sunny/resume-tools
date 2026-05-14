@@ -133,11 +133,15 @@ class ClaudeProvider:
                         num += 1
                         dialogues.append(Dialogue(role="user", num=num, text=cleaned))
                     elif entry_type == "assistant":
-                        text = normalize_text(extract_claude_text(entry.get("message", {}), "assistant"))
+                        message = entry.get("message", {})
+                        text = normalize_text(extract_claude_text(message, "assistant"))
+                        tool_summaries = extract_claude_tool_summaries(message)
                         if not text:
+                            if tool_summaries and dialogues and dialogues[-1].role == "assistant":
+                                dialogues[-1].tool_summaries += tool_summaries
                             continue
                         num += 1
-                        dialogues.append(Dialogue(role="assistant", num=num, text=text))
+                        dialogues.append(Dialogue(role="assistant", num=num, text=text, tool_summaries=tool_summaries))
         except (OSError, UnicodeDecodeError):
             pass
         return dialogues
@@ -174,3 +178,32 @@ def extract_claude_text(message: object, role: str) -> str:
             elif block_type == "image" and role == "user":
                 parts.append("[image]")
     return "\n".join(parts)
+
+
+def extract_claude_tool_summaries(message: object) -> tuple[str, ...]:
+    if not isinstance(message, dict):
+        return ()
+    content = message.get("content", "")
+    if not isinstance(content, list):
+        return ()
+    summaries: list[str] = []
+    for block in content:
+        if not isinstance(block, dict) or block.get("type") != "tool_use":
+            continue
+        summary = summarize_claude_tool_use(block)
+        if summary:
+            summaries.append(summary)
+    return tuple(summaries)
+
+
+def summarize_claude_tool_use(block: dict) -> str:
+    name = str(block.get("name") or "tool")
+    payload = block.get("input")
+    detail = ""
+    if isinstance(payload, dict):
+        for key in ("command", "file_path", "path", "url", "query"):
+            value = payload.get(key)
+            if isinstance(value, str) and value.strip():
+                detail = value.strip()
+                break
+    return one_line(f"{name} {detail}".strip(), 140)

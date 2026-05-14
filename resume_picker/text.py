@@ -19,10 +19,18 @@ MAGENTA = "\033[1;35m"
 HIGHLIGHT = "\033[1;43;30m"
 INLINE_CODE_OPEN = "\033[38;2;203;166;247m"
 INLINE_CODE_CLOSE = "\033[39m"
+FILE_LINK_OPEN = "\033[38;2;142;236;211m"
+FILE_LINK_CLOSE = "\033[39m"
+QUOTE_BAR = "\033[38;2;137;180;250m▌\033[0m"
+QUOTE_TEXT_OPEN = "\033[2m"
 BOLD_CLOSE = "\033[22m"
+CODE_BLOCK_BG = "\033[48;2;31;33;38m"
+CODE_BLOCK_FG = "\033[38;2;216;216;216m"
 
-INLINE_CODE_RE = re.compile(r"`([^`\n]+)`")
+INLINE_CODE_RE = re.compile(r"(?<!`)`([^`\n]+)`(?!`)")
 BOLD_RE = re.compile(r"\*\*([^*\n]+)\*\*")
+FENCE_RE = re.compile(r"^\s*```\s*([A-Za-z0-9_-]+)?\s*$")
+LOCAL_FILE_LINK_RE = re.compile(r"\[([^\]\n]+)\]\(((?:/|~)[^)\n]+)\)")
 WEEKDAYS_CN = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"]
 
 
@@ -151,3 +159,134 @@ def highlight_matches(text: str, needle: str) -> str:
 def render_markdown(text: str) -> str:
     text = BOLD_RE.sub(lambda match: f"{BOLD}{match.group(1)}{BOLD_CLOSE}", text)
     return INLINE_CODE_RE.sub(lambda match: f"{INLINE_CODE_OPEN}{match.group(1)}{INLINE_CODE_CLOSE}", text)
+
+
+def render_markdown_text_line(text: str) -> list[str]:
+    paths: list[str] = []
+
+    def replace_file_link(match: re.Match[str]) -> str:
+        paths.append(match.group(2))
+        return f"{FILE_LINK_OPEN}{match.group(1)}{FILE_LINK_CLOSE}"
+
+    rendered = render_markdown(LOCAL_FILE_LINK_RE.sub(replace_file_link, text))
+    if not paths:
+        return [rendered]
+    path_indent = file_link_path_indent(text)
+    return [rendered, *[f"{DIM}{path_indent}{path}{RESET}" for path in paths]]
+
+
+def render_quote_line(text: str, cols: int) -> list[str]:
+    width = max(8, cols - visual_text_width("▌ "))
+    rendered: list[str] = []
+    for wrapped_line in wrap_visual(text, width):
+        rendered.extend(render_markdown_text_line(wrapped_line))
+    return [quote_prefix_line(line) for line in rendered]
+
+
+def quote_prefix_line(line: str) -> str:
+    return f"{QUOTE_BAR} {QUOTE_TEXT_OPEN}{line}{RESET}" if line else QUOTE_BAR
+
+
+def file_link_path_indent(text: str) -> str:
+    leading = text[: len(text) - len(text.lstrip(" "))]
+    return f"{leading}  " if text.lstrip().startswith(("-", "*", "+")) else leading
+
+
+def render_markdown_lines(text: str, cols: int) -> list[str]:
+    lines: list[str] = []
+    code_lines: list[str] = []
+    code_lang = ""
+    in_code = False
+    for raw_line in text.splitlines():
+        quote = quote_text(raw_line)
+        if quote is not None:
+            if in_code:
+                code_lines.append(raw_line)
+            else:
+                lines.extend(render_quote_line(quote, cols))
+            continue
+        fence = FENCE_RE.match(raw_line)
+        if fence:
+            if in_code:
+                lines.extend(render_code_block(code_lines, code_lang, cols))
+                code_lines = []
+                code_lang = ""
+                in_code = False
+            else:
+                in_code = True
+                code_lang = (fence.group(1) or "").strip().lower()
+            continue
+        if in_code:
+            code_lines.append(raw_line)
+        else:
+            lines.extend(render_markdown_text_line(raw_line))
+    if in_code:
+        lines.extend(render_code_block(code_lines, code_lang, cols))
+    return lines
+
+
+def quote_text(line: str) -> str | None:
+    match = re.match(r"^\s*>\s?(.*)$", line)
+    return match.group(1) if match else None
+
+
+def render_code_block(lines: list[str], lang: str, cols: int) -> list[str]:
+    width = max(24, cols - 6)
+    rendered = ["", code_block_line("", width)]
+    if not lines:
+        lines = [""]
+    for line in dedent_code_lines(lines):
+        for wrapped_line in wrap_visual(line, max(8, width - 4)):
+            rendered.append(code_block_line(wrapped_line, width))
+    rendered.extend([code_block_line("", width), ""])
+    return rendered
+
+
+def dedent_code_lines(lines: list[str]) -> list[str]:
+    indents = [len(line) - len(line.lstrip(" ")) for line in lines if line.strip()]
+    if not indents:
+        return lines
+    indent = min(indents)
+    return [line[indent:] if len(line) >= indent else line for line in lines]
+
+
+def code_block_line(text: str, cols: int) -> str:
+    return f"  {CODE_BLOCK_BG}{CODE_BLOCK_FG}{pad_visual('  ' + text, cols)}{RESET}"
+
+
+def wrap_visual(text: str, max_cols: int) -> list[str]:
+    if not text:
+        return [""]
+    lines: list[str] = []
+    remaining = text
+    while visual_text_width(remaining) > max_cols:
+        used = 0
+        break_index = 0
+        last_space = -1
+        for index, char in enumerate(remaining):
+            width = visual_width(char)
+            if used + width > max_cols:
+                break
+            used += width
+            break_index = index + 1
+            if char.isspace():
+                last_space = index
+        if use_space_break(last_space, max_cols, remaining):
+            lines.append(remaining[:last_space].rstrip())
+            remaining = remaining[last_space + 1 :].lstrip()
+        else:
+            lines.append(remaining[:break_index].rstrip())
+            remaining = remaining[break_index:]
+    lines.append(remaining.rstrip())
+    return lines
+
+
+def use_space_break(last_space: int, max_cols: int, text: str) -> bool:
+    if last_space <= 0:
+        return False
+    before = text[:last_space].rstrip()
+    return visual_text_width(before) >= min(max(8, max_cols // 4), max_cols - 1)
+
+
+def pad_visual(text: str, cols: int) -> str:
+    return text + (" " * max(0, cols - visual_text_width(text)))

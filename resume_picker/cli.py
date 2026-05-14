@@ -9,7 +9,7 @@ from pathlib import Path
 
 from .providers.claude import ClaudeProvider
 from .providers.codex import CodexProvider
-from .ui import Picker, read_state_mode, read_text, write_text
+from .ui import Picker, first_selectable_row_position, read_state_mode, read_text, write_text
 
 
 def mode_from_argv(argv0: str, explicit: str = "") -> str:
@@ -53,7 +53,16 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--list", action="store_true", help="print candidate sessions without opening fzf")
     parser.add_argument("--preview", metavar="SESSION_ID", help="print session-level dialogue preview")
     parser.add_argument("--dialogues", metavar="SESSION_ID", help="print dialogue list for one session")
+    parser.add_argument("--rounds", "--blocks", dest="blocks", metavar="SESSION_ID", help="print dialogue round list for one session")
     parser.add_argument("--message-preview", nargs=2, metavar=("SESSION_ID", "NUM"), help="print one dialogue message")
+    parser.add_argument(
+        "--round-preview",
+        "--block-preview",
+        dest="block_preview",
+        nargs=2,
+        metavar=("SESSION_ID", "NUM"),
+        help="print one dialogue round",
+    )
     parser.add_argument("--helper", nargs=2, metavar=("ACTION", "STATE_DIR"), help=argparse.SUPPRESS)
     parser.add_argument("extra", nargs="*", help=argparse.SUPPRESS)
     args = parser.parse_args(argv)
@@ -76,8 +85,17 @@ def main(argv: list[str] | None = None) -> int:
             return 1
         print(picker.dialogues_rows(session, args.keyword))
         return 0
+    if args.blocks:
+        session = picker.session_by_id(args.blocks)
+        if not session:
+            print(f"Session not found: {args.blocks}", file=sys.stderr)
+            return 1
+        print(picker.dialogue_block_rows(session, args.keyword))
+        return 0
     if args.message_preview:
         return picker.dialogue_preview(args.message_preview[0], int(args.message_preview[1]), args.keyword)
+    if args.block_preview:
+        return picker.dialogue_block_preview(args.block_preview[0], int(args.block_preview[1]), args.keyword)
 
     include_all = args.all
     keyword = args.keyword
@@ -108,6 +126,9 @@ def main(argv: list[str] | None = None) -> int:
         write_text(state_dir / "focus", "list")
         write_text(state_dir / "sessions.txt", rows)
         write_text(state_dir / "keyword", keyword)
+        write_text(state_dir / "load_jump", first_selectable_row_position(rows))
+        write_text(state_dir / "scope_cwd", os.getcwd())
+        write_text(state_dir / "include_all", "1" if include_all else "0")
 
         selected = picker.run_fzf(state_dir, include_all)
         if not selected:

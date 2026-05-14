@@ -2,11 +2,12 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 from datetime import datetime
 from pathlib import Path
 
-from ..models import Dialogue, ProviderConfig, Session, parse_iso
+from ..models import Dialogue, DialogueActivity, PlanStep, PlanUpdate, ProviderConfig, Session, parse_iso
 from ..text import normalize_text, one_line
 
 
@@ -225,6 +226,8 @@ class CodexProvider:
     def parse_dialogues_path(self, path: Path) -> list[Dialogue]:
         dialogues: list[Dialogue] = []
         num = 0
+        continues_previous = False
+        pending_activities: list[DialogueActivity] = []
         try:
             with path.open("r", encoding="utf-8") as handle:
                 for line in handle:
@@ -234,32 +237,147 @@ class CodexProvider:
                         continue
                     if entry.get("type") == "event_msg":
                         payload = entry.get("payload")
-                        if not isinstance(payload, dict) or payload.get("type") != "user_message":
+                        if not isinstance(payload, dict):
+                            continue
+                        if payload.get("type") == "turn_aborted":
+                            continues_previous = True
+                            continue
+                        if payload.get("type") != "user_message":
                             continue
                         text = normalize_text(str(payload.get("message") or ""))
+                        if is_turn_aborted_marker(text):
+                            continues_previous = True
+                            continue
                         if is_noise_message("user", text):
                             continue
                         if dialogues and dialogues[-1].role == "user" and dialogues[-1].text == text:
                             continue
                         num += 1
-                        dialogues.append(Dialogue(role="user", num=num, text=text))
+                        dialogues.append(
+                            Dialogue(role="user", num=num, text=text, continues_previous=continues_previous)
+                        )
+                        continues_previous = False
                         continue
                     if entry.get("type") != "response_item":
                         continue
                     payload = entry.get("payload")
-                    if not isinstance(payload, dict) or payload.get("type") != "message":
+                    if not isinstance(payload, dict):
+                        continue
+                    if payload.get("type") == "function_call":
+                        plan_update = parse_codex_plan_update(payload)
+                        if plan_update:
+                            if dialogues and dialogues[-1].role == "assistant":
+                                append_plan_update(dialogues[-1], plan_update)
+                            else:
+                                pending_activities.append(DialogueActivity(kind="plan", plan_update=plan_update))
+                            continue
+                        summary = summarize_codex_tool_call(payload)
+                        if summary and dialogues and dialogues[-1].role == "assistant":
+                            append_tool_summary(dialogues[-1], summary)
+                        continue
+                    if payload.get("type") != "message":
                         continue
                     role = str(payload.get("role") or "")
                     if role not in ("user", "assistant"):
                         continue
                     text = normalize_text("\n".join(extract_text_blocks(payload.get("content"), role)))
+                    if role == "user" and is_turn_aborted_marker(text):
+                        continues_previous = True
+                        continue
                     if is_noise_message(role, text):
                         continue
                     num += 1
-                    dialogues.append(Dialogue(role=role, num=num, text=text))
+                    activities = tuple(pending_activities) if role == "assistant" else ()
+                    plan_updates = tuple(
+                        activity.plan_update
+                        for activity in activities
+                        if activity.kind == "plan" and activity.plan_update is not None
+                    )
+                    dialogues.append(
+                        Dialogue(
+                            role=role,
+                            num=num,
+                            text=text,
+                            plan_updates=plan_updates,
+                            activities=activities,
+                            continues_previous=continues_previous if role == "user" else False,
+                        )
+                    )
+                    if role == "assistant":
+                        pending_activities.clear()
+                    if role == "user":
+                        continues_previous = False
         except (OSError, UnicodeDecodeError):
             pass
         return dialogues
+
+
+def append_plan_update(dialogue: Dialogue, plan_update: PlanUpdate) -> None:
+    dialogue.plan_updates += (plan_update,)
+    dialogue.activities += (DialogueActivity(kind="plan", plan_update=plan_update),)
+
+
+def append_tool_summary(dialogue: Dialogue, summary: str) -> None:
+    dialogue.tool_summaries += (summary,)
+    dialogue.activities += (DialogueActivity(kind="tool", text=summary),)
+
+
+def summarize_codex_tool_call(payload: dict[str, object]) -> str:
+    name = str(payload.get("name") or "tool")
+    if name == "update_plan":
+        return ""
+    arguments = payload.get("arguments")
+    detail = summarize_codex_tool_arguments(arguments)
+    return one_line(f"{name} {detail}".strip(), 140)
+
+
+def parse_codex_plan_update(payload: dict[str, object]) -> PlanUpdate | None:
+    if str(payload.get("name") or "") != "update_plan":
+        return None
+    arguments = payload.get("arguments")
+    if not isinstance(arguments, str) or not arguments.strip():
+        return None
+    try:
+        parsed = json.loads(arguments)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(parsed, dict):
+        return None
+
+    steps: list[PlanStep] = []
+    raw_plan = parsed.get("plan")
+    if isinstance(raw_plan, list):
+        for item in raw_plan:
+            if not isinstance(item, dict):
+                continue
+            step = normalize_text(str(item.get("step") or ""))
+            if not step:
+                continue
+            steps.append(PlanStep(step=one_line(step, 240), status=str(item.get("status") or "").strip()))
+
+    explanation = normalize_text(str(parsed.get("explanation") or ""))
+    if not steps and not explanation:
+        return None
+    return PlanUpdate(steps=tuple(steps), explanation=explanation)
+
+
+def summarize_codex_tool_arguments(arguments: object) -> str:
+    if not isinstance(arguments, str) or not arguments.strip():
+        return ""
+    try:
+        parsed = json.loads(arguments)
+    except json.JSONDecodeError:
+        parsed = None
+    if isinstance(parsed, dict):
+        for key in ("cmd", "path", "workdir", "url", "query"):
+            value = parsed.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+        return ""
+    match = re.search(r"\*\*\* (?:Update|Add|Delete) File: (.+)", arguments)
+    if match:
+        return match.group(1).strip()
+    return arguments.strip().splitlines()[0]
 
 
 def extract_text_blocks(content: object, role: str) -> list[str]:
@@ -287,3 +405,7 @@ def is_noise_message(role: str, text: str) -> bool:
     if not stripped:
         return True
     return role == "user" and stripped.startswith("<")
+
+
+def is_turn_aborted_marker(text: str) -> bool:
+    return text.strip().startswith("<turn_aborted>")
