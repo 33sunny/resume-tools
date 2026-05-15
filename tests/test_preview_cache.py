@@ -5,7 +5,7 @@ import unittest
 from pathlib import Path
 
 from resume_picker.models import Dialogue, ProviderConfig, Session
-from resume_picker.ui import Picker, read_preview_cache, write_preview_cache, write_text
+from resume_picker.ui import Picker, read_preview_cache, read_text, write_preview_cache, write_text
 
 
 class FakeProvider:
@@ -137,6 +137,30 @@ class PreviewCacheTests(unittest.TestCase):
                 picker.helper_main(state_dir, "page-down-transform", ["1", ""])
 
         self.assertEqual(output.getvalue().strip(), "refresh-preview+preview-top")
+
+    def test_preview_line_scroll_moves_custom_offset_when_preview_is_focused(self):
+        provider = FakeProvider()
+        picker = Picker(provider, Path("fake"), "fake")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            state_dir = Path(tmp)
+            key = "session\tmessages\t1\tneedle"
+            write_text(state_dir / "mode", "dialogues")
+            write_text(state_dir / "focus", "preview")
+            write_text(state_dir / "session_id", "session")
+            write_text(state_dir / "dialogue_view", "messages")
+            write_text(state_dir / "keyword", "needle")
+            write_preview_cache(state_dir, key, [f"line {index}" for index in range(10)], 100)
+            write_text(state_dir / "preview_key", key)
+            write_text(state_dir / "preview_offset", "4")
+
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                picker.helper_main(state_dir, "up-transform", ["1", "needle"])
+            offset = read_text(state_dir / "preview_offset")
+
+        self.assertEqual(output.getvalue().strip(), "refresh-preview+preview-top")
+        self.assertEqual(offset, "3")
 
 
 if __name__ == "__main__":

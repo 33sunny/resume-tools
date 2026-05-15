@@ -27,6 +27,7 @@ BOLD_CLOSE = "\033[22m"
 CODE_BLOCK_BG = "\033[48;2;31;33;38m"
 CODE_BLOCK_FG = "\033[38;2;216;216;216m"
 
+ANSI_RE = re.compile(r"\033\[([0-9;:]*)m")
 INLINE_CODE_RE = re.compile(r"(?<!`)`([^`\n]+)`(?!`)")
 BOLD_RE = re.compile(r"\*\*([^*\n]+)\*\*")
 FENCE_RE = re.compile(r"^\s*```\s*([A-Za-z0-9_-]+)?\s*$")
@@ -153,7 +154,43 @@ def highlight_matches(text: str, needle: str) -> str:
     if not needle:
         return text
     pattern = re.compile(re.escape(needle), re.IGNORECASE)
-    return pattern.sub(lambda match: f"{HIGHLIGHT}{match.group()}{RESET}", text)
+    return pattern.sub(lambda match: f"{HIGHLIGHT}{match.group()}{RESET}{active_sgr_at(text, match.start())}", text)
+
+
+def active_sgr_at(text: str, position: int) -> str:
+    active: list[str] = []
+    for match in ANSI_RE.finditer(text[:position]):
+        params = match.group(1) or "0"
+        if params == "0":
+            active.clear()
+            continue
+        remove_sgr(active, params)
+        active.append(f"\033[{params}m")
+    return "".join(active)
+
+
+def remove_sgr(active: list[str], params: str) -> None:
+    codes = params.split(";")
+    if "22" in codes:
+        active[:] = [item for item in active if item not in (BOLD, DIM)]
+    if "39" in codes:
+        active[:] = [item for item in active if not is_foreground_sgr(item)]
+    if "49" in codes:
+        active[:] = [item for item in active if not is_background_sgr(item)]
+
+
+def is_foreground_sgr(sequence: str) -> bool:
+    if not sequence.startswith("\033[") or not sequence.endswith("m"):
+        return False
+    params = sequence[2:-1].split(";")
+    return any(code in params for code in ("30", "31", "32", "33", "34", "35", "36", "37", "38", "39", "90", "91", "92", "93", "94", "95", "96", "97"))
+
+
+def is_background_sgr(sequence: str) -> bool:
+    if not sequence.startswith("\033[") or not sequence.endswith("m"):
+        return False
+    params = sequence[2:-1].split(";")
+    return any(code in params for code in ("40", "41", "42", "43", "44", "45", "46", "47", "48", "49", "100", "101", "102", "103", "104", "105", "106", "107"))
 
 
 def render_markdown(text: str) -> str:

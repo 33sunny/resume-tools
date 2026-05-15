@@ -9,7 +9,7 @@ from pathlib import Path
 
 from .providers.claude import ClaudeProvider
 from .providers.codex import CodexProvider
-from .ui import Picker, first_selectable_row_position, read_state_mode, read_text, write_text
+from .ui import Picker, filter_rows_by_query, first_selectable_row_position, read_state_mode, read_text, write_text
 
 
 def mode_from_argv(argv0: str, explicit: str = "") -> str:
@@ -103,7 +103,7 @@ def main(argv: list[str] | None = None) -> int:
         print("Search keyword (Enter to show all): ", end="", flush=True)
         keyword = sys.stdin.readline().rstrip("\n")
 
-    sessions = picker.filter_sessions(os.getcwd(), include_all, keyword)
+    sessions = picker.filter_sessions(os.getcwd(), include_all, keyword if args.list else "")
     rows = picker.session_rows(sessions)
 
     if args.list:
@@ -111,7 +111,8 @@ def main(argv: list[str] | None = None) -> int:
             print(rows)
         return 0
 
-    if not rows:
+    visible_rows = filter_rows_by_query(rows, keyword)
+    if not visible_rows:
         scope = "all directories" if include_all else os.getcwd()
         print(f"No {config.session_label} sessions found for {scope}.")
         return 0
@@ -126,7 +127,7 @@ def main(argv: list[str] | None = None) -> int:
         write_text(state_dir / "focus", "list")
         write_text(state_dir / "sessions.txt", rows)
         write_text(state_dir / "keyword", keyword)
-        write_text(state_dir / "load_jump", first_selectable_row_position(rows))
+        write_text(state_dir / "load_jump", first_selectable_row_position(visible_rows))
         write_text(state_dir / "scope_cwd", os.getcwd())
         write_text(state_dir / "include_all", "1" if include_all else "0")
 

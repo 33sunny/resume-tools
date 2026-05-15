@@ -1,7 +1,7 @@
 import re
 import unittest
 
-from resume_picker.text import render_markdown_lines
+from resume_picker.text import DIM, HIGHLIGHT, RESET, highlight_matches, render_markdown_lines
 
 
 ANSI_RE = re.compile(r"\033\[[0-9;:]*m")
@@ -107,6 +107,11 @@ class MarkdownRenderingTests(unittest.TestCase):
         self.assertGreater(len(plain), 1)
         self.assertTrue(all(line.startswith("▌ ") for line in plain))
         self.assertNotIn("▌ -", plain)
+
+    def test_highlight_preserves_active_dim_style_after_match(self):
+        highlighted = highlight_matches(f"{DIM}前面 模糊 后面{RESET}", "模糊")
+
+        self.assertIn(f"{HIGHLIGHT}模糊{RESET}{DIM} 后面", highlighted)
 
 
 if __name__ == "__main__":

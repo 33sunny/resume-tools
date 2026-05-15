@@ -115,7 +115,7 @@ class Picker:
             if needle in session.title.lower() or needle in session.cwd.lower():
                 result.append(session)
                 continue
-            if any(needle in dialogue.text.lower() for dialogue in self.provider.parse_dialogues(session)):
+            if any(needle in dialogue_search_blob(dialogue).lower() for dialogue in self.provider.parse_dialogues(session)):
                 result.append(session)
         return result
 
@@ -144,15 +144,17 @@ class Picker:
         return f"  {summary}"
 
     def session_row(self, session: Session) -> str:
+        dialogues = self.provider.parse_dialogues(session)
         return "\t".join(
             [
                 session.id,
                 format_row_time(session.updated_at),
                 self.session_display_title(session),
                 session.cwd,
-                f"{self.message_count(session)} dialogues",
+                f"{len(dialogues)} dialogues",
                 f"[{session.id[:8]}]",
                 session.provider,
+                session_search_blob(session, dialogues),
             ]
         )
 
@@ -169,11 +171,11 @@ class Picker:
                     rows.append(blank_divider())
                 current_week = week
                 current_day = ""
-                rows.append(f"__DIVIDER__\t{BOLD}{DIM}{full_width_divider(week)}{RESET}\t\t\t\t\t")
+                rows.append(f"__DIVIDER__\t{BOLD}{DIM}{full_width_divider(week)}{RESET}\t\t\t\t\t\t")
             day = format_date_label(timestamp, now)
             if day != current_day:
                 current_day = day
-                rows.append(f"__DIVIDER__\t{BOLD}{DIM}{compact_divider(day)}{RESET}\t\t\t\t\t")
+                rows.append(f"__DIVIDER__\t{BOLD}{DIM}{compact_divider(day)}{RESET}\t\t\t\t\t\t")
             rows.append(self.session_row(session))
         return "\n".join(rows)
 
@@ -192,7 +194,7 @@ class Picker:
             icon = "👤" if dialogue.role == "user" else "🤖"
             color = CYAN if dialogue.role == "user" else YELLOW
             label = f"{color}{dialogue.num:>{num_width}}.{RESET} {icon} {text_style}{text}{RESET}"
-            rows.append(f"{dialogue.num}\t{label}")
+            rows.append(row_with_hidden_search(dialogue.num, label, dialogue_search_blob(dialogue)))
         return "\n".join(rows)
 
     def dialogue_block_rows(self, session: Session, highlight: str = "") -> str:
@@ -214,7 +216,7 @@ class Picker:
             if pattern:
                 text = pattern.sub(lambda match: f"{HIGHLIGHT}{match.group()}{RESET}", text)
             label = f"{MAGENTA}{block.num:>{num_width}}.{RESET} {text}"
-            rows.append(f"{block.num}\t{label}")
+            rows.append(row_with_hidden_search(block.num, label, block_search_blob(block)))
         return "\n".join(rows)
 
     def session_preview(self, session_id: str, keyword: str = "") -> int:
@@ -358,7 +360,7 @@ class Picker:
         count = len(blocks)
         for offset in range(1, count + 1):
             index = (from_pos + direction * offset) % count
-            if any(needle in dialogue.text.lower() for dialogue in blocks[index].dialogues):
+            if needle in block_search_blob(blocks[index]).lower():
                 return index
         return None
 
@@ -405,20 +407,37 @@ class Picker:
         write_preview_offset(state_dir, key, next_offset)
         return True
 
+    def update_preview_line_scroll(self, state_dir: Path, extra: list[str], direction: int) -> bool:
+        row_num = extra[0] if len(extra) > 0 else ""
+        fzf_query = extra[1] if len(extra) > 1 else ""
+        keyword = fzf_query or read_text(state_dir / "keyword")
+        key = preview_state_key(state_dir, row_num, keyword)
+        offset = read_preview_offset(state_dir, key)
+        cache = read_preview_cache(state_dir, key, preview_cols())
+        if cache is None:
+            write_preview_offset(state_dir, key, 0)
+            return False
+        line_count = len(cache[0])
+        next_offset = min(max(0, offset + direction), max(0, line_count - 1))
+        write_preview_offset(state_dir, key, next_offset)
+        return True
+
     def refresh_sessions(self, state_dir: Path, selected_session_id: str) -> int:
         keyword = read_text(state_dir / "keyword")
         include_all = read_text(state_dir / "include_all") == "1"
         cwd = read_text(state_dir / "scope_cwd") or os.getcwd()
-        rows = self.session_rows(self.filter_sessions(cwd, include_all, keyword))
+        rows = self.session_rows(self.filter_sessions(cwd, include_all, ""))
         write_text(state_dir / "sessions.txt", rows)
         reset_preview_scroll(state_dir)
-        position = session_row_position(rows, selected_session_id) or first_selectable_row_position(rows)
+        filtered_rows = filter_rows_by_query(rows, keyword)
+        position = session_row_position(filtered_rows, selected_session_id) or first_selectable_row_position(filtered_rows)
         print(f"reload-sync({self.helper_command(str(state_dir), 'list')})+pos({position})+refresh-preview")
         return 0
 
     def refresh_dialogues(self, state_dir: Path, row_num: str) -> int:
         reset_preview_scroll(state_dir)
-        position = row_num if row_num.isdigit() else "1"
+        rows = self.rows_for_state(state_dir)
+        position = row_position(rows, row_num) or first_selectable_row_position(rows)
         print(f"reload-sync({self.helper_command(str(state_dir), 'list')})+pos({position})+refresh-preview")
         return 0
 
@@ -427,17 +446,15 @@ class Picker:
 
     def helper_main(self, state_dir: Path, action: str, extra: list[str]) -> int:
         if action == "list":
-            if read_state_mode(state_dir) == "dialogues":
-                session_id = read_text(state_dir / "session_id")
-                keyword = read_text(state_dir / "keyword")
-                session = self.session_by_id(session_id)
-                if session:
-                    if read_dialogue_view(state_dir) == "blocks":
-                        print(self.dialogue_block_rows(session, keyword))
-                    else:
-                        print(self.dialogues_rows(session, keyword))
-            else:
-                print(read_text(state_dir / "sessions.txt"), end="")
+            print(self.rows_for_state(state_dir), end="")
+            return 0
+
+        if action == "search-transform":
+            query = extra[0] if extra else ""
+            write_text(state_dir / "keyword", query)
+            reset_preview_scroll(state_dir)
+            position = first_selectable_row_position(self.rows_for_state(state_dir))
+            print(f"reload-sync({self.helper_command(str(state_dir), 'list')})+pos({position})+refresh-preview")
             return 0
 
         if action == "refresh-transform":
@@ -456,6 +473,7 @@ class Picker:
                 keyword = fzf_query or read_text(state_dir / "keyword")
                 key = preview_state_key(state_dir, field1, keyword)
                 cols = preview_cols()
+                had_offset = read_text(state_dir / "preview_key") == key
                 offset = read_preview_offset(state_dir, key)
                 cache = read_preview_cache(state_dir, key, cols)
                 if cache is not None:
@@ -468,6 +486,9 @@ class Picker:
                     if lines is None:
                         return 1
                     write_preview_cache(state_dir, key, lines, cols)
+                if not had_offset and keyword:
+                    offset = initial_keyword_offset(lines, keyword, preview_height())
+                    write_preview_offset(state_dir, key, offset)
                 print_preview_lines(lines, offset)
                 return 0
             keyword = read_text(state_dir / "keyword")
@@ -475,14 +496,16 @@ class Picker:
 
         if action == "up-transform":
             if read_state_mode(state_dir) == "dialogues" and read_state_focus(state_dir) == "preview":
-                print("preview-up")
+                self.update_preview_line_scroll(state_dir, extra, -1)
+                print("refresh-preview+preview-top")
             else:
                 print("up")
             return 0
 
         if action == "down-transform":
             if read_state_mode(state_dir) == "dialogues" and read_state_focus(state_dir) == "preview":
-                print("preview-down")
+                self.update_preview_line_scroll(state_dir, extra, 1)
+                print("refresh-preview+preview-top")
             else:
                 print("down")
             return 0
@@ -552,7 +575,8 @@ class Picker:
             reset_preview_scroll(state_dir)
             print(
                 f"reload-sync({self.helper_command(str(state_dir), 'list')})"
-                "+first+refresh-preview+change-border-label( Sessions )+change-preview-label( Dialogues )"
+                f"+pos({first_selectable_row_position(self.rows_for_state(state_dir))})"
+                "+refresh-preview+change-border-label( Sessions )+change-preview-label( Dialogues )"
                 f"+change-preview-window({dialogue_preview_window(False)})"
             )
             return 0
@@ -573,7 +597,8 @@ class Picker:
                 reset_preview_scroll(state_dir)
                 print(
                     f"reload-sync({self.helper_command(str(state_dir), 'list')})"
-                    "+first+refresh-preview+change-border-label( Sessions )+change-preview-label( Dialogues )"
+                    f"+pos({first_selectable_row_position(self.rows_for_state(state_dir))})"
+                    "+refresh-preview+change-border-label( Sessions )+change-preview-label( Dialogues )"
                     f"+change-preview-window({dialogue_preview_window(False)})"
                 )
             else:
@@ -602,9 +627,11 @@ class Picker:
             write_text(state_dir / "dialogue_view", next_view)
             write_text(state_dir / "focus", "list")
             reset_preview_scroll(state_dir)
+            rows = self.rows_for_state(state_dir)
+            position = row_position(rows, str(target_pos)) or first_selectable_row_position(rows)
             print(
                 f"reload-sync({self.helper_command(str(state_dir), 'list')})"
-                f"+pos({target_pos})+refresh-preview"
+                f"+pos({position})+refresh-preview"
                 f"+change-border-label( {dialogue_border_label(next_view)} )"
                 f"+change-preview-label( {dialogue_preview_label(next_view, False)} )"
                 f"+change-preview-window({dialogue_preview_window(False)})"
@@ -641,6 +668,20 @@ class Picker:
         print(f"Unknown helper action: {action}", file=sys.stderr)
         return 1
 
+    def rows_for_state(self, state_dir: Path) -> str:
+        keyword = read_text(state_dir / "keyword")
+        if read_state_mode(state_dir) == "dialogues":
+            session_id = read_text(state_dir / "session_id")
+            session = self.session_by_id(session_id)
+            if session is None:
+                return ""
+            if read_dialogue_view(state_dir) == "blocks":
+                rows = self.dialogue_block_rows(session, "")
+            else:
+                rows = self.dialogues_rows(session, "")
+            return filter_rows_by_query(rows, keyword)
+        return filter_rows_by_query(read_text(state_dir / "sessions.txt"), keyword)
+
     def run_fzf(self, state_dir: Path, include_all: bool) -> str:
         with_nth = "2,3"
         command = [
@@ -651,6 +692,7 @@ class Picker:
             "--no-sort",
             "--no-mouse",
             "--layout=reverse",
+            "--disabled",
             "--border=rounded",
             "--border-label= Sessions ",
             "--border-label-pos=2",
@@ -658,6 +700,7 @@ class Picker:
             "--preview-label-pos=2",
             "--color=hl:black:yellow,hl+:black:yellow,preview-border:#b98cff,preview-label:#b98cff",
             "--header=↑↓ navigate │ → drill/focus preview │ F5 refresh │ ⇧Tab round/message │ ← back │ ^N/^F match │ ⏎ resume │ Esc",
+            f"--bind=change:transform({self.helper_command(str(state_dir), 'search-transform', '{q}')})",
             f"--bind=up:transform({self.helper_command(str(state_dir), 'up-transform', '{1}', '{q}')})",
             f"--bind=down:transform({self.helper_command(str(state_dir), 'down-transform', '{1}', '{q}')})",
             f"--bind=shift-up:transform({self.helper_command(str(state_dir), 'page-up-transform', '{1}', '{q}')})",
@@ -677,8 +720,10 @@ class Picker:
             "--no-scrollbar",
             "--delimiter=\t",
             f"--with-nth={with_nth}",
-            "--nth=1,2",
         ]
+        keyword = read_text(state_dir / "keyword")
+        if keyword:
+            command.append(f"--query={keyword}")
         helper_list = subprocess.check_output(
             [sys.executable, str(self.script_path), "--mode", self.mode, "--helper", "list", str(state_dir)],
             text=True,
@@ -690,7 +735,75 @@ class Picker:
 
 
 def blank_divider() -> str:
-    return "\t".join(["__DIVIDER__", "", "", "", "", "", ""])
+    return "\t".join(["__DIVIDER__", "", "", "", "", "", "", ""])
+
+
+def row_with_hidden_search(key: int | str, label: str, searchable: str) -> str:
+    return "\t".join([str(key), label, "", "", "", "", "", searchable])
+
+
+def filter_rows_by_query(rows: str, query: str) -> str:
+    if not query:
+        return rows
+    output: list[str] = []
+    pending_dividers: list[str] = []
+    for row in rows.splitlines():
+        if not row:
+            continue
+        if row.startswith("__DIVIDER__"):
+            pending_dividers.append(row)
+            continue
+        if row_matches_query(row, query):
+            output.extend(pending_dividers)
+            pending_dividers.clear()
+            output.append(row)
+    return "\n".join(output)
+
+
+def row_matches_query(row: str, query: str) -> bool:
+    haystack = "\t".join(row.split("\t")[1:]).casefold()
+    return query.casefold() in haystack
+
+
+def search_blob(*parts: object, max_chars: int = 20000) -> str:
+    text = " ".join(str(part or "") for part in parts)
+    cleaned = re.sub(r"\s+", " ", text.replace("\t", " ")).strip()
+    return cleaned[:max_chars]
+
+
+def session_search_blob(session: Session, dialogues: list[Dialogue]) -> str:
+    return search_blob(
+        session.id,
+        session.title,
+        session.cwd,
+        session.provider,
+        *(dialogue_search_blob(dialogue) for dialogue in dialogues),
+        max_chars=500000,
+    )
+
+
+def dialogue_search_blob(dialogue: Dialogue) -> str:
+    parts: list[str] = [dialogue.text]
+    parts.extend(dialogue.tool_summaries)
+    for plan in dialogue.plan_updates:
+        parts.extend(step.step for step in plan.steps)
+    for activity in dialogue.activities:
+        if activity.text:
+            parts.append(activity.text)
+        if activity.plan_update is not None:
+            parts.extend(step.step for step in activity.plan_update.steps)
+    return search_blob(*parts)
+
+
+def block_search_blob(block: DialogueBlock) -> str:
+    return search_blob(*(dialogue_search_blob(dialogue) for dialogue in block.dialogues))
+
+
+def dialogue_match_text(dialogue: Dialogue, needle: str) -> str:
+    text = re.sub(r"\s+", " ", dialogue.text).strip()
+    if needle.lower() in text.lower():
+        return text
+    return dialogue_search_blob(dialogue)
 
 
 def first_selectable_row_position(rows: str) -> str:
@@ -703,8 +816,14 @@ def first_selectable_row_position(rows: str) -> str:
 def session_row_position(rows: str, session_id: str) -> str | None:
     if not session_id or session_id == "__DIVIDER__":
         return None
+    return row_position(rows, session_id)
+
+
+def row_position(rows: str, key: str) -> str | None:
+    if not key:
+        return None
     for index, row in enumerate(rows.splitlines(), start=1):
-        if row.split("\t", 1)[0] == session_id:
+        if row.split("\t", 1)[0] == key:
             return str(index)
     return None
 
@@ -732,7 +851,7 @@ def search_dialogues_preview(dialogues: list[Dialogue], keyword: str, cols: int)
     lines = [f"{MAGENTA}🔍 Keyword: {keyword}{RESET}", ""]
     needle = keyword.lower()
     pattern = re.compile(re.escape(keyword), re.IGNORECASE)
-    hits = [dialogue for dialogue in dialogues if needle in dialogue.text.lower()]
+    hits = [dialogue for dialogue in dialogues if needle in dialogue_search_blob(dialogue).lower()]
     if not hits:
         lines.append(f"{DIM}  (no matches in user/assistant messages){RESET}")
         return lines
@@ -742,7 +861,7 @@ def search_dialogues_preview(dialogues: list[Dialogue], keyword: str, cols: int)
     lines.append(f"{BOLD}{CYAN}──{sep_label}{'─' * sep_fill}{RESET}")
     num_width = len(str(dialogues[-1].num)) if dialogues else 1
     for dialogue in hits[:15]:
-        text = re.sub(r"\s+", " ", dialogue.text).strip()
+        text = dialogue_match_text(dialogue, needle)
         match = pattern.search(text)
         if match:
             start = max(0, match.start() - 30)
@@ -766,6 +885,22 @@ def print_preview_lines(lines: list[str], offset: int = 0) -> None:
         return
     start = min(max(0, offset), max(0, len(lines) - 1))
     print("\n".join(lines[start:]))
+
+
+def initial_keyword_offset(lines: list[str], keyword: str, height: int) -> int:
+    if not keyword:
+        return 0
+    needle = keyword.casefold()
+    for index, line in enumerate(lines):
+        if index < 5:
+            continue
+        if needle in ANSI_RE.sub("", line).casefold():
+            return max(0, index - preview_context_lines(height))
+    return 0
+
+
+def preview_context_lines(height: int) -> int:
+    return max(2, min(6, max(1, height) // 5))
 
 
 def preview_page_offset(lines: list[str], offset: int, height: int, cols: int, direction: int) -> int:

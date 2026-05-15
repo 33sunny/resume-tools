@@ -13,6 +13,7 @@ from ..text import normalize_text, one_line
 
 HARNESS_BLOCK_RE = re.compile(r"<([a-zA-Z][\w-]*)\b[^>]*>.*?</\1>", re.DOTALL)
 TAG_RE = re.compile(r"<[^>]+>")
+INTERRUPT_RE = re.compile(r"^\[Request interrupted by user(?: for tool use)?\]$")
 
 
 def resolve_command(env_name: str, command: str) -> str | None:
@@ -84,7 +85,7 @@ class ClaudeProvider:
                         if not cleaned:
                             continue
                         message_count += 1
-                        if not first_user_message:
+                        if not first_user_message and not is_claude_interrupt_marker(cleaned):
                             first_user_message = cleaned
                     elif entry_type == "assistant":
                         text = extract_claude_text(entry.get("message", {}), "assistant").strip()
@@ -115,6 +116,7 @@ class ClaudeProvider:
     def parse_dialogues(self, session: Session) -> list[Dialogue]:
         dialogues: list[Dialogue] = []
         num = 0
+        continues_previous = False
         try:
             with session.path.open("r", encoding="utf-8") as handle:
                 for line in handle:
@@ -131,7 +133,16 @@ class ClaudeProvider:
                         if not cleaned:
                             continue
                         num += 1
-                        dialogues.append(Dialogue(role="user", num=num, text=cleaned))
+                        is_interrupt = is_claude_interrupt_marker(cleaned)
+                        dialogues.append(
+                            Dialogue(
+                                role="user",
+                                num=num,
+                                text=cleaned,
+                                continues_previous=continues_previous or is_interrupt,
+                            )
+                        )
+                        continues_previous = is_interrupt
                     elif entry_type == "assistant":
                         message = entry.get("message", {})
                         text = normalize_text(extract_claude_text(message, "assistant"))
@@ -155,6 +166,10 @@ def clean_user_text(text: str) -> str:
     text = HARNESS_BLOCK_RE.sub("", text)
     text = TAG_RE.sub("", text)
     return text.strip()
+
+
+def is_claude_interrupt_marker(text: str) -> bool:
+    return bool(INTERRUPT_RE.match(text.strip()))
 
 
 def extract_claude_text(message: object, role: str) -> str:
